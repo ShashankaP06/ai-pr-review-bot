@@ -38,13 +38,15 @@ def _gemini_review(api_key: str, model: str, diff: str) -> str:
     )
     with urllib.request.urlopen(req, timeout=120) as resp:
         data = json.loads(resp.read().decode())
-    try:
-        cand = data["candidates"][0]
-        parts = cand["content"]["parts"]
-        return parts[0]["text"].strip()
-    except (KeyError, IndexError, TypeError) as e:
-        snippet = json.dumps(data, indent=2)[:4000]
-        raise RuntimeError(f"Unexpected Gemini response shape: {e}\n{snippet}") from e
+        try:
+            cand = data["candidates"][0]
+            parts = cand["content"]["parts"]
+            return parts[0]["text"].strip()
+        except (KeyError, IndexError, TypeError) as e:
+            snippet = json.dumps(data, indent=2)[:4000]
+            raise RuntimeError(
+                f"Unexpected Gemini response shape: {e}\n{snippet}"
+            ) from e
 
 
 def _post_comment(token: str, repo: str, pr_number: str, body: str) -> None:
@@ -89,6 +91,8 @@ def main() -> int:
     model = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash").strip()
     if not model:
         model = "gemini-1.5-flash"
+    # Log which model is used (helps confirm the workflow file on this commit is current).
+    print(f"pr_llm_review: GEMINI_MODEL={model}", file=sys.stderr)
 
     with open(diff_path, encoding="utf-8", errors="replace") as f:
         diff = f.read()
@@ -113,12 +117,16 @@ def main() -> int:
                         if d.get("@type", "").endswith("RetryInfo"):
                             sec = d.get("retryDelay", "")
                             if isinstance(sec, str) and sec.endswith("s"):
-                                wait = min(120, max(15, int(float(sec.rstrip("s")) + 5)))
+                                wait = min(
+                                    120,
+                                    max(15, int(float(sec.rstrip("s")) + 5)),
+                                )
                             break
                 except (ValueError, TypeError, KeyError):
                     pass
                 print(
-                    f"Gemini rate limited (429), waiting {wait}s then retrying once...",
+                    f"Gemini rate limited (429) on {model}, waiting {wait}s "
+                    "then retrying once...",
                     file=sys.stderr,
                 )
                 time.sleep(wait)
