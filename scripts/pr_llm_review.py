@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -85,9 +86,9 @@ def main() -> int:
         )
         return 1
 
-    model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash").strip()
+    model = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash").strip()
     if not model:
-        model = "gemini-2.0-flash"
+        model = "gemini-1.5-flash"
 
     with open(diff_path, encoding="utf-8", errors="replace") as f:
         diff = f.read()
@@ -97,17 +98,40 @@ def main() -> int:
         diff = diff[:MAX_DIFF_CHARS] + "\n\n[... diff truncated by CI ...]\n"
         truncated = True
 
-    try:
-        review = _gemini_review(api_key, model, diff)
-    except urllib.error.HTTPError as e:
-        body = e.read().decode(errors="replace")
-        print(f"Gemini HTTP {e.code}: {body}", file=sys.stderr)
-        return 1
-    except urllib.error.URLError as e:
-        print(f"Gemini request failed: {e}", file=sys.stderr)
-        return 1
-    except RuntimeError as e:
-        print(str(e), file=sys.stderr)
+    review = None
+    for attempt in range(2):
+        try:
+            review = _gemini_review(api_key, model, diff)
+            break
+        except urllib.error.HTTPError as e:
+            body = e.read().decode(errors="replace")
+            if e.code == 429 and attempt == 0:
+                wait = 50
+                try:
+                    err_json = json.loads(body)
+                    for d in err_json.get("error", {}).get("details", []):
+                        if d.get("@type", "").endswith("RetryInfo"):
+                            sec = d.get("retryDelay", "")
+                            if isinstance(sec, str) and sec.endswith("s"):
+                                wait = min(120, max(15, int(float(sec.rstrip("s")) + 5)))
+                            break
+                except (ValueError, TypeError, KeyError):
+                    pass
+                print(
+                    f"Gemini rate limited (429), waiting {wait}s then retrying once...",
+                    file=sys.stderr,
+                )
+                time.sleep(wait)
+                continue
+            print(f"Gemini HTTP {e.code}: {body}", file=sys.stderr)
+            return 1
+        except urllib.error.URLError as e:
+            print(f"Gemini request failed: {e}", file=sys.stderr)
+            return 1
+        except RuntimeError as e:
+            print(str(e), file=sys.stderr)
+            return 1
+    if review is None:
         return 1
 
     footer = f"\n\n---\n_AI review via Gemini (`{model}`); experimental._"

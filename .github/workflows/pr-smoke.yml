@@ -32,6 +32,8 @@ jobs:
       - name: Gemini review and PR comment
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # 2.0-flash free tier is easy to exhaust; 1.5-flash often separate quota (override if needed).
+          GEMINI_MODEL: gemini-1.5-flash
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
