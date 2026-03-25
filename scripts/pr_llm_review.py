@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read PR unified diff, call Gemini or an OpenAI-compatible API (e.g. Ollama), post PR comment."""
+"""Read PR unified diff, call Gemini, Ollama Cloud, or OpenAI-compatible API; post PR comment."""
 from __future__ import annotations
 
 import json
@@ -48,6 +48,40 @@ def _gemini_review(api_key: str, model: str, diff: str) -> str:
             raise RuntimeError(
                 f"Unexpected Gemini response shape: {e}\n{snippet}"
             ) from e
+
+
+def _ollama_com_chat_review(host: str, api_key: str, model: str, diff: str) -> str:
+    """POST /api/chat on ollama.com (or compatible host) with Bearer API key."""
+    base = host.rstrip("/")
+    url = f"{base}/api/chat"
+    user_block = (
+        f"{REVIEW_INSTRUCTIONS}\n\n---\n\nUnified diff:\n```diff\n{diff}\n```\n"
+    )
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": user_block}],
+        "stream": False,
+        "options": {"temperature": 0.35},
+    }
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+        method="POST",
+    )
+    timeout = int(os.environ.get("LLM_HTTP_TIMEOUT_SEC", "300"))
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        data = json.loads(resp.read().decode())
+    try:
+        return data["message"]["content"].strip()
+    except (KeyError, TypeError) as e:
+        snippet = json.dumps(data, indent=2)[:4000]
+        raise RuntimeError(
+            f"Unexpected Ollama /api/chat response shape: {e}\n{snippet}"
+        ) from e
 
 
 def _openai_compat_review(base_url: str, api_key: str | None, model: str, diff: str) -> str:
@@ -170,6 +204,29 @@ def _openai_compat_retry_loop(
     raise RuntimeError("OpenAI-compat returned no review text")
 
 
+def _ollama_com_retry_loop(host: str, api_key: str, model: str, diff: str) -> str:
+    for attempt in range(2):
+        try:
+            return _ollama_com_chat_review(host, api_key, model, diff)
+        except urllib.error.HTTPError as e:
+            body = e.read().decode(errors="replace")
+            if e.code == 429 and attempt == 0:
+                print(
+                    "Ollama Cloud rate limited (429), waiting 20s then retrying once...",
+                    file=sys.stderr,
+                )
+                time.sleep(20)
+                continue
+            print(f"Ollama Cloud HTTP {e.code}: {body}", file=sys.stderr)
+            raise
+        except urllib.error.URLError as e:
+            print(f"Ollama Cloud request failed: {e}", file=sys.stderr)
+            raise
+        except RuntimeError:
+            raise
+    raise RuntimeError("Ollama Cloud returned no review text")
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         print("usage: pr_llm_review.py <diff-file>", file=sys.stderr)
@@ -187,6 +244,7 @@ def main() -> int:
         return 1
 
     compat_base = os.environ.get("OPENAI_COMPAT_BASE_URL", "").strip()
+    ollama_key = os.environ.get("OLLAMA_API_KEY", "").strip()
     gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
 
     if compat_base:
@@ -201,6 +259,24 @@ def main() -> int:
             review = _openai_compat_retry_loop(compat_base, api_key, model, _read_diff(diff_path))
         except (urllib.error.HTTPError, urllib.error.URLError, RuntimeError):
             return 1
+    elif ollama_key:
+        host = os.environ.get("OLLAMA_HOST", "https://ollama.com").strip()
+        if not host:
+            host = "https://ollama.com"
+        model = os.environ.get("OLLAMA_MODEL", "gpt-oss:120b").strip() or "gpt-oss:120b"
+        print(
+            f"pr_llm_review: provider=ollama_cloud host={host} model={model}",
+            file=sys.stderr,
+        )
+        review_label = f"Ollama Cloud (`{model}`)"
+        diff, truncated = _load_diff(diff_path)
+        try:
+            review = _ollama_com_retry_loop(host, ollama_key, model, diff)
+        except (urllib.error.HTTPError, urllib.error.URLError, RuntimeError):
+            return 1
+        footer = f"\n\n---\n_AI review via {review_label}; experimental._"
+        body = _build_body(review, footer, truncated)
+        return _post_or_fail(token, repo, pr_number, body)
     elif gemini_key:
         model = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash").strip()
         if not model:
@@ -218,8 +294,8 @@ def main() -> int:
 
     else:
         print(
-            "Set GEMINI_API_KEY (Gemini), or OPENAI_COMPAT_BASE_URL + OPENAI_COMPAT_MODEL "
-            "(Ollama / LM Studio / vLLM OpenAI-compatible server).",
+            "Set one of: GEMINI_API_KEY; OLLAMA_API_KEY (+ OLLAMA_MODEL) for ollama.com; "
+            "or OPENAI_COMPAT_BASE_URL + OPENAI_COMPAT_MODEL for OpenAI-compatible servers.",
             file=sys.stderr,
         )
         return 1

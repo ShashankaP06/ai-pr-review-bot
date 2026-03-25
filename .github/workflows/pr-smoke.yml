@@ -29,12 +29,14 @@ jobs:
         with:
           python-version: "3.12"
 
-      # Provider: set OPENAI_COMPAT_BASE_URL (e.g. self-hosted runner + Ollama) to skip Gemini.
-      # GitHub-hosted ubuntu cannot reach your PC's localhost — use Gemini here or a self-hosted runner.
+      # Provider order in script: OPENAI_COMPAT_BASE_URL → OLLAMA_API_KEY → GEMINI_API_KEY
       - name: LLM review and PR comment
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: gemini-1.5-flash
+          OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
+          OLLAMA_HOST: ${{ vars.OLLAMA_HOST }}
+          OLLAMA_MODEL: ${{ vars.OLLAMA_MODEL }}
           OPENAI_COMPAT_BASE_URL: ${{ vars.OPENAI_COMPAT_BASE_URL }}
           OPENAI_COMPAT_MODEL: ${{ vars.OPENAI_COMPAT_MODEL }}
           OPENAI_COMPAT_API_KEY: ${{ secrets.OPENAI_COMPAT_API_KEY }}
@@ -43,5 +45,6 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           echo "GEMINI_MODEL=$GEMINI_MODEL"
+          echo "OLLAMA_MODEL=${OLLAMA_MODEL:-}"
           echo "OPENAI_COMPAT_BASE_URL=${OPENAI_COMPAT_BASE_URL:-}"
           python scripts/pr_llm_review.py pr.diff
