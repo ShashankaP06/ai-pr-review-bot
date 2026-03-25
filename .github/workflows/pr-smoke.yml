@@ -1,5 +1,5 @@
-# Step 1: prove Actions runs on PRs. Next steps: permissions, diff, LLM, post comment.
-name: PR smoke
+# PR: full diff (truncated if huge) → Gemini → one issue comment on the PR.
+name: PR AI review
 
 on:
   pull_request:
@@ -7,15 +7,44 @@ on:
 
 permissions:
   contents: read
+  pull-requests: write
 
 jobs:
-  smoke:
+  review:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Show PR context
+      - name: PR context and diff
         run: |
           echo "PR #${{ github.event.pull_request.number }}"
           echo "${{ github.head_ref }} → ${{ github.base_ref }}"
-          echo "Action ran successfully."
+          git diff "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}" > pr.diff
+          echo "Diff bytes: $(wc -c < pr.diff)"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Provider order in script: OPENAI_COMPAT_BASE_URL → OLLAMA_API_KEY → GEMINI_API_KEY
+      - name: LLM review and PR comment
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: gemini-1.5-flash
+          OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
+          OLLAMA_HOST: ${{ vars.OLLAMA_HOST }}
+          OLLAMA_MODEL: ${{ vars.OLLAMA_MODEL }}
+          OPENAI_COMPAT_BASE_URL: ${{ vars.OPENAI_COMPAT_BASE_URL }}
+          OPENAI_COMPAT_MODEL: ${{ vars.OPENAI_COMPAT_MODEL }}
+          OPENAI_COMPAT_API_KEY: ${{ secrets.OPENAI_COMPAT_API_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          echo "GEMINI_MODEL=$GEMINI_MODEL"
+          echo "OLLAMA_MODEL=${OLLAMA_MODEL:-}"
+          echo "OPENAI_COMPAT_BASE_URL=${OPENAI_COMPAT_BASE_URL:-}"
+          python scripts/pr_llm_review.py pr.diff
